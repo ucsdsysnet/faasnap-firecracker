@@ -48,6 +48,9 @@ RUN apt-get update \
         screen \
 	clang \
 	llvm \
+	musl \
+	musl-dev \
+	musl-tools \
     && python3 -m pip install \
         setuptools \
         wheel \
@@ -86,6 +89,13 @@ RUN mkdir "$TMP_BUILD_DIR" \
 # Add the tini init binary.
 ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION_TAG}/tini-static-amd64 /sbin/tini
 RUN chmod +x /sbin/tini
+
+# Workaround for musl-gcc to build userfaulfd-sys (musl cannot find linux headers)
+RUN cd /usr/include/x86_64-linux-musl \
+    && ln -s ../x86_64-linux-gnu/asm asm \
+    && ln -s ../linux linux \
+    && ln -s ../asm-generic asm-generic
+
 
 WORKDIR "$FIRECRACKER_SRC_DIR"
 ENTRYPOINT ["/sbin/tini", "--"]

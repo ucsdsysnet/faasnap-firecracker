@@ -86,18 +86,38 @@ impl FdPassingExt for RawFd {
             iov_len: mem::size_of_val(&dummy),
         };
 
+        /*
         let msg: msghdr = libc::msghdr {
             msg_name: std::ptr::null_mut(),
             msg_namelen: 0,
             msg_iov: &mut iov,
             msg_iovlen: 1,
+            __pad1: 0, // only musl has paddings
             msg_control: unsafe { u.buf.as_mut_ptr() as *mut c_void },
             msg_controllen: msg_len,
+            __pad2: 0, // only musl has paddings
             msg_flags: 0,
+        };
+        */
+        let msg = unsafe {
+            // Musl's msghdr has private fields, so this is the only way to
+            // initialize it.
+            let mut msghdr = mem::MaybeUninit::<msghdr>::zeroed();
+            let p = msghdr.as_mut_ptr();
+            (*p).msg_name = std::ptr::null_mut();
+            (*p).msg_namelen = 0;
+            (*p).msg_iov = &mut iov;
+            (*p).msg_iovlen = 1;
+            (*p).msg_control = u.buf.as_mut_ptr() as *mut c_void;
+            (*p).msg_controllen = msg_len;
+            (*p).msg_flags = 0;
+            msghdr.assume_init()
         };
 
         unsafe {
             let hdr = libc::cmsghdr {
+                #[cfg(target_env = "musl")]
+                __pad1: 0,
                 cmsg_level: libc::SOL_SOCKET,
                 cmsg_type: libc::SCM_RIGHTS,
                 cmsg_len: libc::CMSG_LEN(mem::size_of::<c_int>() as u32) as _,
@@ -130,14 +150,33 @@ impl FdPassingExt for RawFd {
             iov_base: &mut dummy as *mut c_int as *mut c_void,
             iov_len: mem::size_of_val(&dummy),
         };
+        /*
         let mut msg: msghdr = libc::msghdr {
             msg_name: std::ptr::null_mut(),
             msg_namelen: 0,
             msg_iov: &mut iov,
             msg_iovlen: 1,
+            __pad1: 0, // only musl has paddings
             msg_control: unsafe { u.buf.as_mut_ptr() as *mut c_void },
             msg_controllen: msg_len,
+            __pad2: 0, // only musl has paddings
             msg_flags: 0,
+        };
+        */
+
+        let mut msg = unsafe {
+            // Musl's msghdr has private fields, so this is the only way to
+            // initialize it.
+            let mut msghdr = mem::MaybeUninit::<msghdr>::zeroed();
+            let p = msghdr.as_mut_ptr();
+            (*p).msg_name = std::ptr::null_mut();
+            (*p).msg_namelen = 0;
+            (*p).msg_iov = &mut iov;
+            (*p).msg_iovlen = 1;
+            (*p).msg_control = u.buf.as_mut_ptr() as *mut c_void;
+            (*p).msg_controllen = msg_len;
+            (*p).msg_flags = 0;
+            msghdr.assume_init()
         };
 
         unsafe {
