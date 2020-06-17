@@ -10,6 +10,10 @@
 //! machine (microVM).
 #![deny(missing_docs)]
 
+// crates for userfaultfd
+extern crate userfaultfd;
+extern crate passfd;
+
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 /// Syscalls allowed through the seccomp filter.
