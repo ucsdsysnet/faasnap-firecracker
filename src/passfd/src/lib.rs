@@ -86,19 +86,17 @@ impl FdPassingExt for RawFd {
             iov_len: mem::size_of_val(&dummy),
         };
 
-        /*
+        #[cfg(target_env = "gnu")]
         let msg: msghdr = libc::msghdr {
             msg_name: std::ptr::null_mut(),
             msg_namelen: 0,
             msg_iov: &mut iov,
             msg_iovlen: 1,
-            __pad1: 0, // only musl has paddings
             msg_control: unsafe { u.buf.as_mut_ptr() as *mut c_void },
             msg_controllen: msg_len,
-            __pad2: 0, // only musl has paddings
             msg_flags: 0,
         };
-        */
+        #[cfg(target_env = "musl")]
         let msg = unsafe {
             // Musl's msghdr has private fields, so this is the only way to
             // initialize it.
@@ -150,20 +148,17 @@ impl FdPassingExt for RawFd {
             iov_base: &mut dummy as *mut c_int as *mut c_void,
             iov_len: mem::size_of_val(&dummy),
         };
-        /*
+        #[cfg(target_env = "gnu")]
         let mut msg: msghdr = libc::msghdr {
             msg_name: std::ptr::null_mut(),
             msg_namelen: 0,
             msg_iov: &mut iov,
             msg_iovlen: 1,
-            __pad1: 0, // only musl has paddings
             msg_control: unsafe { u.buf.as_mut_ptr() as *mut c_void },
             msg_controllen: msg_len,
-            __pad2: 0, // only musl has paddings
             msg_flags: 0,
         };
-        */
-
+        #[cfg(target_env = "musl")]
         let mut msg = unsafe {
             // Musl's msghdr has private fields, so this is the only way to
             // initialize it.
