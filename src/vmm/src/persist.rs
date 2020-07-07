@@ -255,8 +255,10 @@ pub fn load_snapshot(
     use self::LoadSnapshotError::*;
     let track_dirty = params.enable_diff_snapshots;
     let microvm_state = snapshot_state_from_file(&params.snapshot_path, version_map)?;
-    let guest_memory = guest_memory_from_file(&params.mem_file_path, &microvm_state.memory_state)?;
-    guest_memory.register_for_upf().map_err(UserPageFault)?;
+    let guest_memory = guest_memory_from_file(&params.mem_file_path, &microvm_state.memory_state, params.enable_user_page_faults)?;
+    if params.enable_user_page_faults == true {
+        guest_memory.register_for_upf(&params.sock_file_path).map_err(UserPageFault)?;
+    }
     builder::build_microvm_from_snapshot(
         event_manager,
         microvm_state,
@@ -280,10 +282,11 @@ fn snapshot_state_from_file(
 fn guest_memory_from_file(
     mem_file_path: &PathBuf,
     mem_state: &GuestMemoryState,
+    enable_user_page_faults: bool,
 ) -> std::result::Result<GuestMemoryMmap, LoadSnapshotError> {
     use self::LoadSnapshotError::{DeserializeMemory, MemoryBackingFile};
     let mem_file = File::open(mem_file_path).map_err(MemoryBackingFile)?;
-    GuestMemoryMmap::restore(&mem_file, mem_state).map_err(DeserializeMemory)
+    GuestMemoryMmap::restore(&mem_file, mem_state, enable_user_page_faults).map_err(DeserializeMemory)
 }
 
 #[cfg(test)]

@@ -48,6 +48,10 @@ pub struct LoadSnapshotParams {
     pub snapshot_path: PathBuf,
     /// Path to the file that contains the guest memory to be loaded.
     pub mem_file_path: PathBuf,
+    /// Setting this flag enables user page faults handling by a different process.
+    pub enable_user_page_faults: bool,
+    /// Path to the passfd socket.
+    pub sock_file_path: PathBuf,
     /// Setting this flag will enable KVM dirty page tracking and will
     /// allow taking subsequent incremental snapshots.
     #[serde(default)]
