@@ -237,7 +237,7 @@ impl SnapshotMemory for GuestMemoryMmap {
 
             // Cause a page fault on the first page to communicate the start_addr's hVA
             unsafe{
-                info!("after reg: ptr={:p}, mem value = {:?}, len={:?}", addr, *addr, len)
+                print!("after reg: ptr={:p}, mem value = {:?}, len={:?}", addr, *addr, len)
             }
 
             Ok(())
