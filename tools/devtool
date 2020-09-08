@@ -73,7 +73,7 @@
 # Development container image (name:tag)
 # This should be updated whenever we upgrade the development container.
 # (Yet another step on our way to reproducible builds.)
-DEVCTR_IMAGE="fcuvm/dev:v16_upf"
+DEVCTR_IMAGE="vhiveease/fcuvm_dev:latest"
 
 # Naming things is hard
 MY_NAME="Firecracker $(basename "$0")"
@@ -201,8 +201,6 @@ ensure_devctr() {
     # Check if we have the container image available locally. Attempt to
     # download it, if we don't.
     [[ $(docker images -q "$DEVCTR_IMAGE" | wc -l) -gt 0 ]] || {
-        say "About to pull docker image $DEVCTR_IMAGE"
-        get_user_confirmation || die "Aborted."
 
         docker pull "${DEVCTR_IMAGE}"
 
