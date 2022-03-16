@@ -9,7 +9,12 @@
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::SeekFrom;
+use std::io;
+use std::collections::HashMap;
+use std::ptr::null_mut;
+use std::thread;
 
+use libc::printf;
 use logger::info;
 // for userfaultfd
 use std::path::PathBuf;
@@ -20,10 +25,7 @@ use passfd::FdPassingExt;
 
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
-use vm_memory::{
-    Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap,
-    GuestMemoryRegion, GuestRegionMmap, MemoryRegionAddress, MmapRegion,
-};
+use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap, MemoryRegionAddress, MmapRegion, mmap};
 
 use crate::DirtyBitmap;
 
@@ -62,9 +64,20 @@ where
     ) -> std::result::Result<(), Error>;
     /// Creates a GuestMemoryMmap given a `file` containing the data
     /// and a `state` containing mapping information.
-    fn restore(file: &File, state: &GuestMemoryState, enable_user_page_faults: bool) -> std::result::Result<Self, Error>;
+    fn restore(mem_file_path: &PathBuf,
+        mem_state: &GuestMemoryState,
+        enable_user_page_faults: bool,
+        overlay_file_path: &PathBuf,
+        overlay_regions: &HashMap<i64, i64>,
+        ws_file_path: &PathBuf,
+        ws_regions: &Vec<Vec<i64>>,
+        load_ws: bool,
+        fadvise: &String,
+    ) -> std::result::Result<Self, Error>;
     /// Registers guest memory for hanlding page faults with an external user-level process
     fn register_for_upf(&self, sock_file_path: &PathBuf) -> std::result::Result<(), Error>;
+    /// load working set
+    fn load_working_set(&self, ws_regions: &Vec<Vec<i64>>) -> std::result::Result<(), Error>;
 }
 
 /// Errors associated with dumping guest memory to file.
@@ -80,6 +93,8 @@ pub enum Error {
     WriteMemory(GuestMemoryError),
     /// Cannot register region for user page fault handling.
     UserPageFault(userfaultfd::Error),
+    /// Overlay regions error.
+    OverlayRegions(std::io::Error),
 }
 
 impl Display for Error {
@@ -91,6 +106,7 @@ impl Display for Error {
             CreateRegion(err) => write!(f, "Cannot create memory region: {:?}", err),
             WriteMemory(err) => write!(f, "Cannot dump memory: {:?}", err),
             UserPageFault(err) => write!(f, "Cannot register memory for uPF: {:?}", err),
+            OverlayRegions(err) => write!(f, "Cannot mmap overlay regions: {:?}", err),            
         }
     }
 }
@@ -173,32 +189,144 @@ impl SnapshotMemory for GuestMemoryMmap {
 
     /// Creates a GuestMemoryMmap given a `file` containing the data
     /// and a `state` containing mapping information.
-    fn restore(file: &File, state: &GuestMemoryState, enable_user_page_faults: bool) -> std::result::Result<Self, Error> {
+    fn restore(mem_file_path: &PathBuf,
+        state: &GuestMemoryState,
+        enable_user_page_faults: bool,
+        overlay_file_path: &PathBuf,
+        overlay_regions: &HashMap<i64, i64>,
+        ws_file_path: &PathBuf,
+        ws_regions: &Vec<Vec<i64>>,
+        load_ws: bool,
+        fadvise: &String,
+    ) -> std::result::Result<Self, Error> {
+        let page_size = sysconf::page::pagesize() as i64;
         let mut mmap_regions = Vec::new();
+        assert!(state.regions.len() == 1); // for now only support one region
         for region in state.regions.iter() {
-            // userfaultfd requires allocating anonymous memory
-            let mut prot = libc::MAP_NORESERVE | libc::MAP_PRIVATE;
-            if enable_user_page_faults {
-                prot = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
-            }
-            let mmap_region = MmapRegion::build(
-                Some(FileOffset::new(
+            assert!(region.offset == 0);
+
+            let (flags, file_offset) = if mem_file_path.clone().into_os_string().eq("") { // no memfile, anony mapping
+                (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, None)
+            } else { // backing file
+                let file = File::open(mem_file_path).map_err(Error::FileHandle)?;
+                (libc::MAP_NORESERVE | libc::MAP_PRIVATE, Some(FileOffset::new(
                     file.try_clone().map_err(Error::FileHandle)?,
                     region.offset,
-                )),
+                )))
+            };
+
+            let mmap_region = MmapRegion::build( // build base layer
+                file_offset,
                 region.size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                prot,
+                flags,
             )
             .map(|r| GuestRegionMmap::new(r, GuestAddress(region.base_address)))
             .map_err(Error::CreateRegion)?
             .map_err(Error::CreateMemory)?;
+            info!("base layer mmap'd. offset = {:?}, len={:?}", region.offset, region.size);
+            let addr = mmap_region.as_ptr();
+            // overlay layer
+            if !overlay_file_path.clone().into_os_string().eq("") {
+                let file = File::open(overlay_file_path).map_err(Error::FileHandle)?;
+                let fd = file.as_raw_fd();
+                for (off, len) in overlay_regions {
+                    let offset = *off * page_size;
+                    let length = *len * page_size;
+                    let ret = unsafe { libc::mmap((addr.offset(offset as isize)) as *mut u8 as _, length as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_FIXED | libc::MAP_NORESERVE | libc::MAP_PRIVATE, fd, offset as libc::off_t)};
+                    if ret == libc::MAP_FAILED {
+                        return Err(Error::OverlayRegions(std::io::Error::last_os_error()));
+                    }
+                }
+            }
 
+            // working set layer
+            if !ws_file_path.clone().into_os_string().eq("") {
+                let file = File::open(ws_file_path).map_err(Error::FileHandle)?;
+                let fd = file.as_raw_fd();
+                let mut file_off: u64 = 0;
+                for region in ws_regions {
+                    let off = region[0] * page_size;
+                    let len = region[1] * page_size;
+                    let fd = file.as_raw_fd();
+                    let ret = unsafe { libc::mmap((addr.offset(off as isize)) as *mut u8 as _, len as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_FIXED | libc::MAP_NORESERVE | libc::MAP_PRIVATE, fd, (file_off) as libc::off_t) };
+                    if ret == libc::MAP_FAILED {
+                        return Err(Error::OverlayRegions(std::io::Error::last_os_error()));
+                    }
+                    file_off += len as u64;
+                }
+            }
             mmap_regions.push(mmap_region);
         }
+    
+        // if load_ws {
+        //         let start = addr.clone() as u64;
+        //         let new_ws_regions = ws_regions.clone();
+        //         let new_ol_regions = overlay_regions.clone();
+        //         thread::Builder::new()
+        //             .name("fc_ws_loader".to_owned()).spawn(move || {
+        //             info!("in the thread");
+        //             let mut a: u8 = 0;
+        //             let mut sorted: Vec<_> = new_ws_regions.into_iter().collect();
+        //             sorted.sort_by(|x,y| x.1.cmp(&y.1));
+        //             for (off, file_off) in sorted {
+        //                 let len = new_ol_regions[&off];
+        //                 for pos in (off..off+len).step_by(4096) {
+        //                     unsafe {a ^= *((start as *const u8).offset(pos as isize))};
+        //                 }
+        //             }
+        //             info!("loaded, {}", a);
+        //         }).expect("loader thread spawn failed.");
+        //     }
 
         Ok(Self::from_regions(mmap_regions).map_err(Error::CreateMemory)?)
     }
+
+    /// Use both memfile and wsfile
+    // fn restore2(memfile: &File, wsfile: &File, state: &GuestMemoryState, enable_user_page_faults: bool, overlay_regions: &HashMap<i64, i64>, groups: &Vec<Vec<i64>>, load_ws: bool) -> std::result::Result<Self, Error> {
+    //     let page_size = sysconf::page::pagesize() as i64;
+    //     let mut mmap_regions = Vec::new();
+    //     assert!(state.regions.len() == 1); // for now only support one region
+    //     for region in state.regions.iter() {
+    //         assert!(region.offset == 0);
+    //         // anonymous memory as base layer
+    //         let mut flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+    //         let mmap_region = MmapRegion::build(
+    //             None,
+    //             region.size,
+    //             libc::PROT_READ | libc::PROT_WRITE,
+    //             flags,
+    //         )
+    //         .map(|r| GuestRegionMmap::new(r, GuestAddress(region.base_address)))
+    //         .map_err(Error::CreateRegion)?
+    //         .map_err(Error::CreateMemory)?;
+    //         info!("original region's offset = {:?}, len={:?}", region.offset, region.size);
+    //         let addr = mmap_region.as_ptr();
+    //         // memfile as non-active upper layer
+    //         for (off, len) in overlay_regions {
+    //             let file_off = *off as u64;
+    //             let fd = memfile.as_raw_fd();
+    //             let ret = unsafe { libc::mmap((addr.offset(*off as isize)) as *mut u8 as _, *len as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_FIXED | libc::MAP_NORESERVE | libc::MAP_PRIVATE, fd, (file_off) as libc::off_t) };
+    //             if ret == libc::MAP_FAILED {
+    //                 return Err(Error::OverlayRegions(std::io::Error::last_os_error()));
+    //             }
+    //         }
+    //         // wsfile as active upper layer
+    //         let mut file_off: u64 = 0;
+    //         for group in groups {
+    //             let off = group[0] * page_size;
+    //             let len = group[1] * page_size;
+    //             let fd = wsfile.as_raw_fd();
+    //             let ret = unsafe { libc::mmap((addr.offset(off as isize)) as *mut u8 as _, len as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_FIXED | libc::MAP_NORESERVE | libc::MAP_PRIVATE, fd, (file_off) as libc::off_t) };
+    //             if ret == libc::MAP_FAILED {
+    //                 return Err(Error::OverlayRegions(std::io::Error::last_os_error()));
+    //             }
+    //             file_off += len as u64;
+    //         }
+    //         mmap_regions.push(mmap_region);
+    //     }
+    //     Ok(Self::from_regions(mmap_regions).map_err(Error::CreateMemory)?)
+    // }    
 
     /// Registers guest memory regions for handling page faults
     /// with an external user-level process.
@@ -234,6 +362,30 @@ impl SnapshotMemory for GuestMemoryMmap {
             Ok(())
         })
         .map_err(Error::UserPageFault)
+    }
+
+    fn load_working_set(&self, ws_regions: &Vec<Vec<i64>>) -> std::result::Result<(), Error> {
+        self.with_regions(|_, region| {
+            info!("Start loading working set");
+
+            let addr = region.get_host_address(region.to_region_addr(region.start_addr()).unwrap()).unwrap();
+            let len = region.len();
+            info!("Host address of the region's start = {:p}, len={:?}", addr, len);
+            // let mut sorted: Vec<_> = ws_regions.into_iter().collect();
+            // sorted.sort_by(|x,y| x.1.cmp(&y.1));
+            let mut a: u8 = 0;
+            let page_size = sysconf::page::pagesize() as i64;
+            for item in ws_regions {
+                let off = item[0] * page_size;
+                let len = item[1] * page_size;
+                for pos in (off..off+len).step_by(page_size as usize) {
+                    unsafe {a ^= *((addr as *const u8).offset(pos as isize))};
+                }
+            }
+            info!("loaded, {}", a);
+            Ok(())
+        })
+        .map_err(Error::FileHandle)
     }
 }
 

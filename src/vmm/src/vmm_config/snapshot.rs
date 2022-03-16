@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
+use std::collections::HashMap;
 /// The snapshot type options that are available when
 /// creating a new snapshot.
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
@@ -48,14 +48,26 @@ pub struct LoadSnapshotParams {
     pub snapshot_path: PathBuf,
     /// Path to the file that contains the guest memory to be loaded.
     pub mem_file_path: PathBuf,
+    /// Setting this flag will enable KVM dirty page tracking and will
+    /// allow taking subsequent incremental snapshots.
+    pub enable_diff_snapshots: bool,
     /// Setting this flag enables user page faults handling by a different process.
     pub enable_user_page_faults: bool,
     /// Path to the passfd socket.
     pub sock_file_path: PathBuf,
-    /// Setting this flag will enable KVM dirty page tracking and will
-    /// allow taking subsequent incremental snapshots.
+    /// overlay path
+    pub overlay_file_path: PathBuf,
+    /// Enable overlay regions mmap
+    pub overlay_regions: HashMap<i64, i64>,
+    /// ws file path
+    pub ws_file_path: PathBuf,
+    /// ws file mappings: 
+    pub ws_regions: Vec<Vec<i64>>,
+    /// enable locally load ws
+    pub load_ws: bool,
     #[serde(default)]
-    pub enable_diff_snapshots: bool,
+    /// fadvise for memfile
+    pub fadvise: String,
 }
 
 /// The microVM state options.
